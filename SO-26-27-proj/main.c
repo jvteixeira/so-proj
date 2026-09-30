@@ -10,10 +10,11 @@ int main(int argc, char **argv){
 	DataCenter dc;
 	datacenter_init(&dc);
 
-	if (argc != 5) {
-    fprintf(stderr, "Usage: %s <servers> <ram> <disk> <cpus>\n", argv[0]);
-    return 1;
-  }
+	if (argc < 5 || argc > 6) {
+		fprintf(stderr, "Usage: %s <servers> <ram> <disk> <cpus> OR %s <servers> <ram> <disk> <cpus> <input_dir>\n", 
+			argv[0], argv[0]);
+		return 1;
+  	}
 
 	size_t servers;
 	size_t ram;
@@ -23,15 +24,16 @@ int main(int argc, char **argv){
 	if (parse_size_t_arg(argv[1], &servers) != 0 ||
 			parse_size_t_arg(argv[2], &ram) != 0 ||
 			parse_size_t_arg(argv[3], &disk) != 0 ||
-			parse_double_arg(argv[4], &cpu) != 0) {
+			parse_double_arg(argv[4], &cpu) != 0 || 
+			(argc == 6 && validate_directory_arg(argv[5]))) {
 		fprintf(stderr, "Invalid command line arguments.\n");
 		return 1;
 	}
 
 	Resources resources = {
-    .ram = ram,
-    .disk = disk,
-    .cpu = cpu
+    	.ram = ram,
+    	.disk = disk,
+    	.cpu = cpu
 	};
 
 	if(datacenter_configure(&dc, servers, &resources) != 0){

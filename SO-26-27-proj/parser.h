@@ -95,4 +95,7 @@ int parse_execute(int fd, char *id);
  */
 int parse_wait(int fd, unsigned int *delay);
 
+
+int validate_directory_arg(const char *str);
+
 #endif // PARSER__H

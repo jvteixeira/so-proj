@@ -9,6 +9,7 @@
 #include <unistd.h>
 #include <string.h>
 #include <stddef.h>
+#include <fcntl.h>
 
 #include "constants.h"
 #include "datacenter.h"
@@ -270,17 +271,22 @@ static int validate_command_delimiter(Command command, char delimiter){
   return (delimiter == '\n' || delimiter == '\0') ? 0 : -1;
 }
 
+
+int validate_directory_arg(const char *str) {
+  int fd = open(str, O_RDONLY | O_DIRECTORY);
+  if (fd == -1) return 1;
+  return 0;
+}
+
 int parse_size_t_arg(const char *str, size_t *out) {
   char *end;
   errno = 0;
 
-  if (str == NULL || str[0] == '\0' || str[0] == '-')
-    return 1;
+  if (str == NULL || str[0] == '\0' || str[0] == '-') return 1;
 
   unsigned long long value = strtoull(str, &end, 10);
 
-  if (errno != 0 || *end != '\0')
-    return 1;
+  if (errno != 0 || *end != '\0') return 1;
 
   *out = (size_t)value;
   return 0;
