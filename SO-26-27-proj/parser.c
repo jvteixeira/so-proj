@@ -271,6 +271,14 @@ static int validate_command_delimiter(Command command, char delimiter){
   return (delimiter == '\n' || delimiter == '\0') ? 0 : -1;
 }
 
+/**
+ * Checks if directory exists.
+ *
+ * @param str Directory to read from.
+ *
+ * @return 0 on success.
+ * @return -1 on failure.
+ */
 
 int validate_directory_arg(const char *str) {
   int fd = open(str, O_RDONLY | O_DIRECTORY);
