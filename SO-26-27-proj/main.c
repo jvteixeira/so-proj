@@ -106,7 +106,7 @@ void aux_executer(DataCenter dc, int fd) {
 
 			case EOC:
 				datacenter_destroy(&dc);
-				return 0;
+				exit(0);
 		}
 	}
 }
