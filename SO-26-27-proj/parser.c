@@ -321,7 +321,7 @@ int parse_directory_arg(const char *str, const char ***file_list) {
     return 0;
   }
 
-  *file_list = malloc((ssize_t)count * sizeof(char *));
+  *file_list = malloc((size_t)count * sizeof(char *));
 
   if (*file_list == NULL) {
     for (int i = 0; i < count; i++) free(namelist[i]);
