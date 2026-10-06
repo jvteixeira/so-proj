@@ -5,6 +5,7 @@
 #include <time.h>
 #include <stdlib.h>
 #include <string.h>
+#include "parser.h"
 
 void datacenter_init(DataCenter *dc) {
   dc->servers = NULL;

@@ -1,52 +1,19 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
+#include <fcntl.h>
 
 #include "parser.h"
 #include "datacenter.h"
 #include "constants.h"
 
-int main(int argc, char **argv){
-	DataCenter dc;
-	datacenter_init(&dc);
-
-	if (argc < 5 || argc > 6) {
-		fprintf(stderr, "Usage: %s <servers> <ram> <disk> <cpus> OR %s <servers> <ram> <disk> <cpus> <input_dir>\n", 
-			argv[0], argv[0]);
-		return 1;
-  	}
-
-	size_t servers;
-	size_t ram;
-	size_t disk;
-	double cpu;
-
-	if (parse_size_t_arg(argv[1], &servers) != 0 ||
-			parse_size_t_arg(argv[2], &ram) != 0 ||
-			parse_size_t_arg(argv[3], &disk) != 0 ||
-			parse_double_arg(argv[4], &cpu) != 0 || 
-			(argc == 6 && validate_directory_arg(argv[5]))) {
-		fprintf(stderr, "Invalid command line arguments.\n");
-		return 1;
-	}
-
-	Resources resources = {
-    	.ram = ram,
-    	.disk = disk,
-    	.cpu = cpu
-	};
-
-	if(datacenter_configure(&dc, servers, &resources) != 0){
-		fprintf(stderr, "Failed to configure Data Center.\n");
-		return 1;
-	}
-
+void aux_executer(DataCenter dc, int fd) {
 	while(1){
-		switch (get_next_command(STDIN_FILENO)){
+		switch (get_next_command(fd)){
 			case CMD_DEFINE: {
 				VMType vmtype;
 
-				if (parse_define(STDIN_FILENO, &vmtype) != 0) {
+				if (parse_define(fd, &vmtype) != 0) {
 					fprintf(stderr, "Invalid define command. See H (help) for usage.\n");
 					continue;
 				}
@@ -64,7 +31,7 @@ int main(int argc, char **argv){
 			case CMD_RESERVE: {
 				Reservation reservation = {0};
 
-				size_t num_items = parse_reserve(STDIN_FILENO, &reservation, MAX_RESERVATIONS_ITEMS);
+				size_t num_items = parse_reserve(fd, &reservation, MAX_RESERVATIONS_ITEMS);
 
 				if (num_items == 0) {
 					fprintf(stderr, "Invalid reserve command. See H (help) for usage.\n");
@@ -84,7 +51,7 @@ int main(int argc, char **argv){
 			case CMD_EXECUTE:
 				char id[MAX_STRING_SIZE];
 
-				if(parse_execute(STDIN_FILENO, id) != 0){
+				if(parse_execute(fd, id) != 0){
 					fprintf(stderr, "Invalid execute command. See H (help) for usage.\n");
 					continue;
 				}
@@ -109,7 +76,7 @@ int main(int argc, char **argv){
 			case CMD_WAIT:
 				unsigned int delay;
 
-				if(parse_wait(STDIN_FILENO, &delay) != 0){
+				if(parse_wait(fd, &delay) != 0){
 					fprintf(stderr, "Invalid wait command. See H (help) for usage.\n");
 					continue;
 				}
@@ -141,5 +108,54 @@ int main(int argc, char **argv){
 				datacenter_destroy(&dc);
 				return 0;
 		}
+	}
+}
+
+int main(int argc, char **argv){
+	DataCenter dc;
+	int dir_fd;
+	datacenter_init(&dc);
+
+	if (argc < 5 || argc > 6) {
+		fprintf(stderr, "Usage: %s <servers> <ram> <disk> <cpus> OR %s <servers> <ram> <disk> <cpus> <input_dir>\n", 
+			argv[0], argv[0]);
+		return 1;
+  	}
+
+	size_t servers;
+	size_t ram;
+	size_t disk;
+	double cpu;
+
+	if (parse_size_t_arg(argv[1], &servers) != 0 ||
+			parse_size_t_arg(argv[2], &ram) != 0 ||
+			parse_size_t_arg(argv[3], &disk) != 0 ||
+			parse_double_arg(argv[4], &cpu) != 0 || 
+			(argc == 6 && (dir_fd = validate_directory_arg(argv[5])) < 0)){
+		fprintf(stderr, "Invalid command line arguments.\n");
+		return 1;
+	}
+
+	Resources resources = {
+    	.ram = ram,
+    	.disk = disk,
+    	.cpu = cpu
+	};
+
+	if(datacenter_configure(&dc, servers, &resources) != 0){
+		fprintf(stderr, "Failed to configure Data Center.\n");
+		return 1;
+	}
+
+	if (argc == 6) {
+		const char **files = NULL;
+		int fd;
+		int c = parse_directory_arg(argv[5], &files);
+		for (int i = 0; i < c; i++) {
+			fd = openat(dir_fd, files[i], O_RDONLY);
+			aux_executer(dc, fd);
+		}
+	} else if (argc == 5) {
+		aux_executer(dc, STDIN_FILENO);
 	}
 }

@@ -1,5 +1,6 @@
 #include "parser.h"
 
+#define _DEFAULT_SOURCE
 #include <ctype.h>
 #include <math.h>
 #include <errno.h>
@@ -10,6 +11,7 @@
 #include <string.h>
 #include <stddef.h>
 #include <fcntl.h>
+#include <dirent.h>
 
 #include "constants.h"
 #include "datacenter.h"
@@ -283,7 +285,57 @@ static int validate_command_delimiter(Command command, char delimiter){
 int validate_directory_arg(const char *str) {
   int fd = open(str, O_RDONLY | O_DIRECTORY);
   if (fd == -1) return 1;
+  return fd;
+}
+
+int conf_filter(const struct dirent *entry) {
+
+  size_t len = strlen(entry->d_name);
+
+  if (len<5) return 0;
+
+  const char *extention = entry->d_name + (len-5);
+
+  if (strcmp(extention, ".conf") == 0) return 1;
+
   return 0;
+}
+
+int parse_directory_arg(const char *str, const char ***file_list) {
+  /*
+    for each, searches strings with .conf at the end. 
+    strstr(".conf\0");
+    should return list with all the files
+  */
+
+  struct dirent **namelist;
+  int count = scandir(str, &namelist, conf_filter, alphasort);
+  if (count < 0) {
+    *file_list = NULL;
+    return -1;
+  }
+
+  if (count == 0) {
+    *file_list = NULL;
+    free(namelist);
+    return 0;
+  }
+
+  *file_list = malloc(count * sizeof(char *));
+
+  if (*file_list == NULL) {
+    for (int i = 0; i < count; i++) free(namelist[i]);
+    free(namelist);
+    return -1;
+  }
+
+  for (int i = 0; i < count; i++) {
+    (*file_list)[i] = strdup(namelist[i]->d_name);
+    free(namelist[i]);
+  }
+
+  free(namelist);
+  return count;
 }
 
 int parse_size_t_arg(const char *str, size_t *out) {

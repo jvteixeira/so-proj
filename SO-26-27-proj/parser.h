@@ -97,5 +97,6 @@ int parse_wait(int fd, unsigned int *delay);
 
 
 int validate_directory_arg(const char *str);
+int parse_directory_arg(const char *str, const char ***file_list);
 
 #endif // PARSER__H
