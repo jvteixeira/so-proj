@@ -5,6 +5,7 @@
 #include <time.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 #include "parser.h"
 
 void datacenter_init(DataCenter *dc) {
@@ -109,6 +110,20 @@ int datacenter_reserve(DataCenter *dc, Reservation *reservation) {
 
   dc->reservations[dc->num_reservations] = *reservation;
   dc->num_reservations++;
+
+  for(int i = 0; i < reservation->vms_count; i++) {
+    reservation->vms[i]->VMType->input_folder; // pasta para copiar
+    reservation->vms[i]->id // id da vm
+    reservation->id[i] // id reserva
+    char path[MAX_PATH_SIZE];
+
+    snprintf(path, sizeof(path), "/tmp/CloudIST/%s/%s", reservation->id[i], reservation->vms[i]->id);
+
+    int fd_origem = open(reservation->vms[i]->VMType->input_folder, O_RDONLY);
+    int fd_destino = open(path, O_CREAT);
+  }
+
+
 
   return 0;
 }
