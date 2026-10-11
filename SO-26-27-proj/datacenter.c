@@ -1,12 +1,20 @@
 #include "datacenter.h"
 #include "datacenter_utils.h"
 
+#include <dirent.h>
+#include <fcntl.h>
+#include <limits.h>
 #include <stdio.h>
-#include <time.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <time.h>
 #include <unistd.h>
+#include <errno.h>
 #include "parser.h"
+
+#define BUFFER_SIZE 4096
 
 void datacenter_init(DataCenter *dc) {
   dc->servers = NULL;
@@ -90,6 +98,95 @@ int datacenter_define_VM(DataCenter *dc, VMType *type){
   return 0;
 }
 
+/* Função auxiliar para criar diretoria ignorando erro se já existir */
+static int ensure_dir_exists(const char *path, mode_t mode) {
+    if (mkdir(path, mode) != 0) {
+        if (errno != EEXIST) {
+            return -1;
+        }
+    }
+    return 0;
+}
+
+/* Copia um único ficheiro normal usando descritores POSIX */
+static int copy_file(const char *src_path, const char *dst_path, mode_t mode) {
+    int src_fd = open(src_path, O_RDONLY);
+    if (src_fd < 0) return -1;
+
+    int dst_fd = open(dst_path, O_WRONLY | O_CREAT | O_TRUNC, mode);
+    if (dst_fd < 0) {
+      close(src_fd);
+      return -1;
+    }
+
+    char buffer[BUFFER_SIZE];
+    ssize_t bytes_read;
+    while ((bytes_read = read(src_fd, buffer, sizeof(buffer))) > 0) {
+      char *out_ptr = buffer;
+      ssize_t bytes_to_write = bytes_read;
+      while (bytes_to_write > 0) {
+        ssize_t bytes_written = write(dst_fd, out_ptr, (size_t)bytes_to_write);
+        if (bytes_written < 0) {
+          close(src_fd);
+          close(dst_fd);
+          return -1;
+        }
+        bytes_to_write -= bytes_written;
+        out_ptr += bytes_written;
+      }
+    }
+
+    close(src_fd);
+    close(dst_fd);
+    return (bytes_read < 0) ? -1 : 0;
+}
+
+/* Copia recursivamente todo o conteúdo de src_path para dst_path */
+static int copy_directory_recursive(const char *src_path, const char *dst_path) {
+  struct stat st;
+  if (stat(src_path, &st) != 0) return -1;
+
+  if (ensure_dir_exists(dst_path, st.st_mode) != 0) {
+    return -1;
+  }
+
+  DIR *dir = opendir(src_path);
+  if (!dir) return -1;
+
+  struct dirent *entry;
+  char src_child[PATH_MAX];
+  char dst_child[PATH_MAX];
+
+  while ((entry = readdir(dir)) != NULL) {
+    if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
+      continue;
+    }
+
+    snprintf(src_child, sizeof(src_child), "%s/%s", src_path, entry->d_name);
+    snprintf(dst_child, sizeof(dst_child), "%s/%s", dst_path, entry->d_name);
+
+    struct stat child_st;
+    if (lstat(src_child, &child_st) != 0) {
+      closedir(dir);
+      return -1;
+    }
+
+    if (S_ISDIR(child_st.st_mode)) {
+      if (copy_directory_recursive(src_child, dst_child) != 0) {
+        closedir(dir);
+        return -1;
+      }
+    } else if (S_ISREG(child_st.st_mode)) {
+      if (copy_file(src_child, dst_child, child_st.st_mode) != 0) {
+        closedir(dir);
+        return -1;
+      }
+    }
+  }
+  closedir(dir);
+  return 0;
+}
+
 int datacenter_reserve(DataCenter *dc, Reservation *reservation) {
   if (!dc->configured) {
     fprintf(stderr, "Data Center needs to be configured!\n");
@@ -105,25 +202,36 @@ int datacenter_reserve(DataCenter *dc, Reservation *reservation) {
     return 1;
   }
 
-  if (reservation_commit(dc, reservation) != 0)
-    return 1;
-
+  if (reservation_commit(dc, reservation) != 0) return 1;
+  
   dc->reservations[dc->num_reservations] = *reservation;
   dc->num_reservations++;
 
-  for(int i = 0; i < reservation->vms_count; i++) {
-    reservation->vms[i]->VMType->input_folder; // pasta para copiar
-    reservation->vms[i]->id // id da vm
-    reservation->id[i] // id reserva
-    char path[MAX_PATH_SIZE];
-
-    snprintf(path, sizeof(path), "/tmp/CloudIST/%s/%s", reservation->id[i], reservation->vms[i]->id);
-
-    int fd_origem = open(reservation->vms[i]->VMType->input_folder, O_RDONLY);
-    int fd_destino = open(path, O_CREAT);
+  if (ensure_dir_exists("/tmp/CloudIST", 0755) != 0) {
+    perror("Erro ao criar /tmp/CloudIST");
+    return 1;
   }
 
+  // Cria a pasta da reserva: /tmp/CloudIST/<ID-reserva>
+  char res_path[MAX_PATH_SIZE];
+  snprintf(res_path, sizeof(res_path), "/tmp/CloudIST/%s", reservation->id);
+  if (ensure_dir_exists(res_path, 0755) != 0) {
+    perror("Erro ao criar pasta da reserva");
+    return 1;
+  }
 
+  // Cria a pasta de cada VM e copia os ficheiros de entrada
+  for (int i = 0; i < reservation->num_vms; i++) {
+  char vm_path[MAX_PATH_SIZE];
+  snprintf(vm_path, sizeof(vm_path), "%s/%s", res_path, reservation->vms[i]->id);
+
+  const char *src_folder = reservation->vms[i]->type->input_folder;
+
+  if (copy_directory_recursive(src_folder, vm_path) != 0) {
+    fprintf(stderr, "Erro ao copiar inputs de %s para %s\n", src_folder, vm_path);
+    return 1;
+    }
+  }
 
   return 0;
 }

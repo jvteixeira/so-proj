@@ -50,7 +50,7 @@ void aux_executer(DataCenter dc, int fd) {
 
 			case CMD_EXECUTE:
 				char id[MAX_STRING_SIZE];
-
+			
 				if(parse_execute(fd, id) != 0){
 					fprintf(stderr, "Invalid execute command. See H (help) for usage.\n");
 					continue;
@@ -62,7 +62,6 @@ void aux_executer(DataCenter dc, int fd) {
 				}
 
 				printf("Finished reservation execution!\n");
-
 				break;
 
 			case CMD_LIST:
