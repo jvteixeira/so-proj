@@ -193,17 +193,19 @@ int datacenter_reserve(DataCenter *dc, Reservation *reservation) {
     return 1;
   }
 
-  if(reservation_validate(dc, reservation) != 0){
+  if (reservation_validate(dc, reservation) != 0) {
     return 1;
   }
 
-  if (dc->num_reservations >= MAX_RESERVATIONS){
+  if (dc->num_reservations >= MAX_RESERVATIONS) {
     fprintf(stderr, "Max number of reservations reached\n");
     return 1;
   }
 
-  if (reservation_commit(dc, reservation) != 0) return 1;
-  
+  if (reservation_commit(dc, reservation) != 0) {
+    return 1;
+  }
+
   dc->reservations[dc->num_reservations] = *reservation;
   dc->num_reservations++;
 
@@ -221,9 +223,9 @@ int datacenter_reserve(DataCenter *dc, Reservation *reservation) {
   }
 
   // Cria a pasta de cada VM e copia os ficheiros de entrada
-  for (int i = 0; (size_t) i < reservation->num_vms; i++) {
+  for (size_t i = 0; i < reservation->num_vms; i++) {
     char vm_path[MAX_PATH_SIZE];
-    snprintf(vm_path, MAX_PATH_SIZE, "%s/%s", res_path, reservation->vms[i]->id);
+    snprintf(vm_path, sizeof(vm_path), "/tmp/CloudIST/%s/%s", reservation->id, reservation->vms[i]->id);
 
     const char *src_folder = reservation->vms[i]->type->input_folder;
 
@@ -235,6 +237,7 @@ int datacenter_reserve(DataCenter *dc, Reservation *reservation) {
 
   return 0;
 }
+
 
 int datacenter_execute(DataCenter *dc, const char *reservation_id) {
   if(!dc->configured){
