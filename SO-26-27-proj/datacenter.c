@@ -221,7 +221,7 @@ int datacenter_reserve(DataCenter *dc, Reservation *reservation) {
   }
 
   // Cria a pasta de cada VM e copia os ficheiros de entrada
-  for (int i = 0; (size_t) i < reservation->num_vms; i++) {
+  for (int i = 0; i < reservation->num_vms; i++) {
     char vm_path[MAX_PATH_SIZE];
     snprintf(vm_path, sizeof(vm_path), "%s/%s", res_path, reservation->vms[i]->id);
 
