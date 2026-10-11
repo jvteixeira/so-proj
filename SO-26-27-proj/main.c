@@ -48,7 +48,7 @@ void aux_executer(DataCenter dc, int fd) {
 				break;
 			}
 
-			case CMD_EXECUTE:
+			case CMD_EXECUTE: {
 				char id[MAX_STRING_SIZE];
 			
 				if(parse_execute(fd, id) != 0){
@@ -63,7 +63,7 @@ void aux_executer(DataCenter dc, int fd) {
 
 				printf("Finished reservation execution!\n");
 				break;
-
+			}
 			case CMD_LIST:
 				if (datacenter_list(&dc) != 0) {
 					fprintf(stderr, "Failed to list VMs.\n");
@@ -71,8 +71,8 @@ void aux_executer(DataCenter dc, int fd) {
 				}
 
 				break;
+			case CMD_WAIT: {
 
-			case CMD_WAIT:
 				unsigned int delay;
 
 				if(parse_wait(fd, &delay) != 0){
@@ -82,7 +82,7 @@ void aux_executer(DataCenter dc, int fd) {
 
 				datacenter_wait(delay);
 				break;
-
+			}
 			case CMD_INVALID:
 				fprintf(stderr, "Invalid Command. See H (help) for usage.\n");
 				break;

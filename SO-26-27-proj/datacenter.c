@@ -221,15 +221,15 @@ int datacenter_reserve(DataCenter *dc, Reservation *reservation) {
   }
 
   // Cria a pasta de cada VM e copia os ficheiros de entrada
-  for (int i = 0; i < reservation->num_vms; i++) {
-  char vm_path[MAX_PATH_SIZE];
-  snprintf(vm_path, sizeof(vm_path), "%s/%s", res_path, reservation->vms[i]->id);
+  for (int i = 0; (size_t) i < reservation->num_vms; i++) {
+    char vm_path[MAX_PATH_SIZE];
+    snprintf(vm_path, sizeof(vm_path), "%s/%s", res_path, reservation->vms[i]->id);
 
-  const char *src_folder = reservation->vms[i]->type->input_folder;
+    const char *src_folder = reservation->vms[i]->type->input_folder;
 
-  if (copy_directory_recursive(src_folder, vm_path) != 0) {
-    fprintf(stderr, "Erro ao copiar inputs de %s para %s\n", src_folder, vm_path);
-    return 1;
+    if (copy_directory_recursive(src_folder, vm_path) != 0) {
+      fprintf(stderr, "Erro ao copiar inputs de %s para %s\n", src_folder, vm_path);
+      return 1;
     }
   }
 
