@@ -4,7 +4,7 @@
 # Input/output files
 *.in
 *.out
-*.zip
+./*/*.zip
 
 # Executable 
 cloudIST
