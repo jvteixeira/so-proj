@@ -1,1 +1,12 @@
-.DS_Store
+# Object files
+*.o
+
+# Input/output files
+*.in
+*.out
+*.DS_Store
+*.zip
+
+
+# Executable 
+cloudIST
