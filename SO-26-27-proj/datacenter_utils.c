@@ -6,6 +6,8 @@
 #include <unistd.h>
 #include <sys/wait.h>
 #include <sys/resource.h>
+#include <math.h>
+#include <errno.h>
 
 VMType *VMType_exists(DataCenter *dc, const char* type_id){
 	for(size_t i = 0; i < dc->num_vm_types; i++){
@@ -155,6 +157,23 @@ int reservation_commit(DataCenter *dc, Reservation *reservation){
 			new_vm->type = item->vm_type;
 			new_vm->server = server;
 			new_vm->state = VM_STATE_RESERVED;
+			snprintf(new_vm->reservation_id, sizeof(new_vm->reservation_id), "%s", reservation->id);
+
+			double local_cpus = (dc->local_cpus > 0.0) ? dc->local_cpus : (dc->servers[0].total.cpu * (double)dc->num_servers);
+			double total_dc_cpu = dc->servers[0].total.cpu * (double)dc->num_servers;
+			double cpulimit_calc = 0.0;
+			if (total_dc_cpu > 0.0) {
+				cpulimit_calc = (100.0 * item->vm_type->required.cpu * local_cpus) / total_dc_cpu;
+			}
+			double max_cpulimit = 100.0 * local_cpus;
+			if (cpulimit_calc > max_cpulimit) {
+				cpulimit_calc = max_cpulimit;
+			}
+			int limit = (int)round(cpulimit_calc);
+			if (limit < 1) {
+				limit = 1;
+			}
+			new_vm->cpulimit = limit;
 
 			resources_sub(&server->available, item->vm_type->required);
 
@@ -238,22 +257,128 @@ void reservation_destroy(DataCenter *dc, Reservation *reservation) {
 	dc->num_reservations--;
 }
 
+void vm_destroy(DataCenter *dc, VM *vm) {
+	if (dc == NULL || vm == NULL) return;
+
+	Server *server = vm->server;
+	if (server != NULL) {
+		resources_add(&server->available, vm->type->required);
+
+		for (size_t j = 0; j < server->num_hosted_vms; j++) {
+			if (server->hosted_vms[j] == vm) {
+				memmove(&server->hosted_vms[j],
+						&server->hosted_vms[j + 1],
+						(server->num_hosted_vms - j - 1) * sizeof(VM *));
+				server->num_hosted_vms--;
+				server->hosted_vms[server->num_hosted_vms] = NULL;
+				break;
+			}
+		}
+	}
+
+	Reservation *res = NULL;
+	for (size_t i = 0; i < dc->num_reservations; i++) {
+		for (size_t j = 0; j < dc->reservations[i].num_vms; j++) {
+			if (dc->reservations[i].vms[j] == vm) {
+				res = &dc->reservations[i];
+				memmove(&res->vms[j],
+						&res->vms[j + 1],
+						(res->num_vms - j - 1) * sizeof(VM *));
+				res->num_vms--;
+				res->vms[res->num_vms] = NULL;
+				break;
+			}
+		}
+		if (res != NULL) break;
+	}
+
+	free(vm);
+
+	if (res != NULL && res->num_vms == 0) {
+		res->state = RES_STATE_FINISHED;
+		size_t idx;
+		for (idx = 0; idx < dc->num_reservations; idx++) {
+			if (&dc->reservations[idx] == res)
+				break;
+		}
+		if (idx < dc->num_reservations) {
+			memmove(&dc->reservations[idx],
+					&dc->reservations[idx + 1],
+					(dc->num_reservations - idx - 1) * sizeof(Reservation));
+			dc->num_reservations--;
+		}
+	}
+}
+
 void spawn_vm_child(VM *vm) {
-	(void)vm; // To avoid warning.
+	char vm_dir[MAX_PATH_SIZE];
+	if (vm->reservation_id[0] != '\0') {
+		snprintf(vm_dir, sizeof(vm_dir), "/tmp/CloudIST/%s/%s", vm->reservation_id, vm->id);
+	} else {
+		char res_id[MAX_STRING_SIZE] = {0};
+		const char *last_underscore = strrchr(vm->id, '_');
+		if (last_underscore != NULL) {
+			size_t prefix_len = (size_t)(last_underscore - vm->id);
+			if (prefix_len < sizeof(res_id)) {
+				strncpy(res_id, vm->id, prefix_len);
+				res_id[prefix_len] = '\0';
+			}
+		}
+		snprintf(vm_dir, sizeof(vm_dir), "/tmp/CloudIST/%s/%s", res_id, vm->id);
+	}
+	if (chdir(vm_dir) != 0) {
+		// Directory might not exist or failed to change; proceed anyway
+	}
 
-	// TODO: Limit RAM, DISK and use exec with cpulimit.
+	// RAM limit
+	struct rlimit lim_as;
+	rlim_t ram_bytes = (rlim_t)vm->type->required.ram * (1024ULL * 1024ULL * 1024ULL);
+	lim_as.rlim_cur = ram_bytes;
+	lim_as.rlim_max = ram_bytes;
+	setrlimit(RLIMIT_AS, &lim_as);
 
-	fprintf(stderr, "VM execution not implemented in base version.\n");
+	// Disk file size limit
+	struct rlimit lim_fsize;
+	rlim_t disk_bytes = (rlim_t)vm->type->required.disk * (1024ULL * 1024ULL * 1024ULL);
+	lim_fsize.rlim_cur = disk_bytes;
+	lim_fsize.rlim_max = disk_bytes;
+	setrlimit(RLIMIT_FSIZE, &lim_fsize);
+
+	// CPU limit using cpulimit
+	char cpulimit_str[32];
+	snprintf(cpulimit_str, sizeof(cpulimit_str), "%d", vm->cpulimit > 0 ? vm->cpulimit : 100);
+
+	execlp("cpulimit", "cpulimit", "-q", "-f", "-l", cpulimit_str, "--", vm->type->exec_path, (char *)NULL);
+
+	// Fallback if cpulimit is not installed
+	if (errno == ENOENT) {
+		execl(vm->type->exec_path, vm->type->exec_path, (char *)NULL);
+	}
+
+	perror("Failed to execute VM application");
+	_exit(1);
 }
 
 int spawn_all_vms(Reservation *res) {
 	for (size_t i = 0; i < res->num_vms; i++) {
 		VM *vm = res->vms[i];
 
-		// TODO: Implement fork code. Set VM PID and update VM state to running.
+		fflush(stdout);
+		fflush(stderr);
 
-		spawn_vm_child(vm);
+		pid_t pid = fork();
+		if (pid < 0) {
+			perror("Failed to fork VM process");
+			return 1;
+		}
 
+		if (pid == 0) {
+			spawn_vm_child(vm);
+			_exit(1);
+		}
+
+		vm->pid = pid;
+		vm->state = VM_STATE_RUNNING;
 	}
 
 	return 0;
@@ -261,9 +386,12 @@ int spawn_all_vms(Reservation *res) {
 
 void wait_for_all_vms(Reservation *res) {
 	for (size_t i = 0; i < res->num_vms; i++) {
-		// TODO: IMPLEMENT WAITING FOR VM
-
-		res->vms[i]->state = VM_STATE_TERMINATED;
+		VM *vm = res->vms[i];
+		if (vm != NULL && vm->state == VM_STATE_RUNNING && vm->pid > 0) {
+			int status;
+			waitpid(vm->pid, &status, 0);
+			vm->state = VM_STATE_TERMINATED;
+		}
 	}
 }
 

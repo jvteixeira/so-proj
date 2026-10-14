@@ -29,6 +29,8 @@ typedef struct VM {
   Server *server; // Server where the VM is placed.
   pid_t pid;      // PID of executable file.
   VMState state;  // State of the VM.
+  char reservation_id[MAX_STRING_SIZE]; // Reservation id
+  int cpulimit;   // CPULIMIT percentage
 } VM;
 
 typedef struct Server {
@@ -76,7 +78,39 @@ typedef struct DataCenter {
     size_t num_reservations;
 
 	int configured;		      // Wheter the datacenter is configured or not.
+	double local_cpus;        // Number of local machine cores for CloudIST
 } DataCenter;
+
+/**
+ * Sets the number of local machine CPU cores allocated for CloudIST.
+ *
+ * @param dc Pointer to Data Center.
+ * @param local_cpus Number of local CPU cores.
+ */
+void datacenter_set_local_cpus(DataCenter *dc, double local_cpus);
+
+/**
+ * Reaps any terminated VM child processes and cleans up their resources.
+ *
+ * @param dc Pointer to Data Center.
+ */
+void datacenter_reap_vms(DataCenter *dc);
+
+/**
+ * Checks whether the Data Center currently has any running VMs.
+ *
+ * @param dc Pointer to Data Center.
+ * @return 1 if there are running VMs, 0 otherwise.
+ */
+int datacenter_has_running_vms(DataCenter *dc);
+
+/**
+ * Executes a delay command while periodically reaping terminated VMs.
+ *
+ * @param dc Pointer to Data Center.
+ * @param delay_ms Delay in ms.
+ */
+void datacenter_wait_dc(DataCenter *dc, unsigned int delay_ms);
 
 /**
  * Initializes a Data Center.

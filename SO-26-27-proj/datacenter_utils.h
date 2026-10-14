@@ -72,6 +72,17 @@ Reservation *find_pending_reservation(DataCenter *dc, const char *reservation_id
 void reservation_destroy(DataCenter *dc, Reservation *reservation);
 
 /**
+ * Destroys a single VM: frees its resources back to the hosting server,
+ * removes it from the server's hosted VM list and the reservation's VM list,
+ * frees the VM, and if all VMs of the reservation have finished, removes the
+ * reservation from the Data Center.
+ *
+ * @param dc Pointer to the Data Center containing the VM.
+ * @param vm Pointer to the VM to destroy.
+ */
+void vm_destroy(DataCenter *dc, VM *vm);
+
+/**
  * Runs in the child process after fork(): sets resource limits (RAM,
  * disk) and execs the VM's workload under cpulimit. Never returns
  * (either execs successfully or calls exit(1) on failure).

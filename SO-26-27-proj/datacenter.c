@@ -13,8 +13,17 @@
 #include <unistd.h>
 #include <errno.h>
 #include "parser.h"
+#include <sys/wait.h>
 
 #define BUFFER_SIZE 4096
+
+static DataCenter *g_current_dc = NULL;
+
+void datacenter_set_local_cpus(DataCenter *dc, double local_cpus) {
+  if (dc != NULL) {
+    dc->local_cpus = local_cpus;
+  }
+}
 
 void datacenter_init(DataCenter *dc) {
   dc->servers = NULL;
@@ -25,15 +34,27 @@ void datacenter_init(DataCenter *dc) {
   dc->num_reservations = 0;
 
   dc->configured = 0;
+  dc->local_cpus = 0.0;
+  g_current_dc = dc;
 }
 
 void datacenter_destroy(DataCenter *dc) {
+  if (dc == NULL) return;
+
+  datacenter_reap_vms(dc);
+  while (datacenter_has_running_vms(dc)) {
+    datacenter_wait_dc(dc, 20);
+  }
+
   for (size_t i = 0; i < dc->num_servers; i++) {
     for(size_t j = 0; j < dc->servers[i].num_hosted_vms; j++){
       free(dc->servers[i].hosted_vms[j]);
     }
   }
   free(dc->servers);
+  dc->servers = NULL;
+  dc->num_servers = 0;
+  dc->configured = 0;
 }
 
 int datacenter_configure(DataCenter *dc, size_t num_servers, Resources *resources){
@@ -93,7 +114,19 @@ int datacenter_define_VM(DataCenter *dc, VMType *type){
     return 1;
   }
   
-  dc->vm_types[dc->num_vm_types++] = *type;
+  VMType resolved_type = *type;
+  char abs_exec[MAX_PATH_SIZE];
+  if (absolute_path(type->exec_path, abs_exec, sizeof(abs_exec)) == 0) {
+    strncpy(resolved_type.exec_path, abs_exec, sizeof(resolved_type.exec_path) - 1);
+    resolved_type.exec_path[sizeof(resolved_type.exec_path) - 1] = '\0';
+  }
+  char abs_input[MAX_PATH_SIZE];
+  if (absolute_path(type->input_folder, abs_input, sizeof(abs_input)) == 0) {
+    strncpy(resolved_type.input_folder, abs_input, sizeof(resolved_type.input_folder) - 1);
+    resolved_type.input_folder[sizeof(resolved_type.input_folder) - 1] = '\0';
+  }
+
+  dc->vm_types[dc->num_vm_types++] = resolved_type;
 
   return 0;
 }
@@ -245,18 +278,14 @@ int datacenter_execute(DataCenter *dc, const char *reservation_id) {
     return 1;
   }
 
+  datacenter_reap_vms(dc);
+
   Reservation *res = find_pending_reservation(dc, reservation_id);
   if (!res) return 1;
 
   if (spawn_all_vms(res) != 0) return 1;
 
   res->state = RES_STATE_RUNNING;
-
-  wait_for_all_vms(res);
-
-  res->state = RES_STATE_FINISHED;
-
-  reservation_destroy(dc, res);
 
   return 0;
 }
@@ -266,6 +295,8 @@ int datacenter_list(DataCenter *dc) {
     fprintf(stderr, "Data Center needs to be configured!\n");
     return 1;
   }
+
+  datacenter_reap_vms(dc);
 
   printf("=================================== DATA CENTER STATUS ===================================\n");
   printf("\n[ PHYSICAL SERVERS ] (%zu total)\n", dc->num_servers);
@@ -359,7 +390,82 @@ int datacenter_list(DataCenter *dc) {
   return 0;
 }
 
+/**
+ * Polls for any terminated VM child processes using waitpid(..., WNOHANG)
+ * and cleans up their resources immediately.
+ *
+ * @param dc Pointer to Data Center.
+ */
+void datacenter_reap_vms(DataCenter *dc) {
+  if (dc == NULL || !dc->configured) return;
+
+  pid_t pid;
+  int status;
+  while ((pid = waitpid(-1, &status, WNOHANG)) > 0) {
+    int found = 0;
+    for (size_t i = 0; i < dc->num_reservations; i++) {
+      Reservation *res = &dc->reservations[i];
+      for (size_t j = 0; j < res->num_vms; j++) {
+        VM *vm = res->vms[j];
+        if (vm != NULL && vm->pid == pid) {
+          vm_destroy(dc, vm);
+          found = 1;
+          break;
+        }
+      }
+      if (found) break;
+    }
+  }
+}
+
+/**
+ * Checks if the Data Center currently has any running VMs.
+ *
+ * @param dc Pointer to Data Center.
+ * @return 1 if running VMs exist, 0 otherwise.
+ */
+int datacenter_has_running_vms(DataCenter *dc) {
+  if (dc == NULL || !dc->configured) return 0;
+
+  for (size_t i = 0; i < dc->num_reservations; i++) {
+    if (dc->reservations[i].state == RES_STATE_RUNNING && dc->reservations[i].num_vms > 0) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
+/**
+ * Suspends execution for delay_ms while periodically checking for
+ * terminated child VMs and freeing their resources.
+ *
+ * @param dc Pointer to Data Center.
+ * @param delay_ms Time to wait in milliseconds.
+ */
+void datacenter_wait_dc(DataCenter *dc, unsigned int delay_ms) {
+  struct timespec start, now;
+  clock_gettime(CLOCK_MONOTONIC, &start);
+
+  while (1) {
+    if (dc != NULL) {
+      datacenter_reap_vms(dc);
+    }
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    long elapsed_ms = (now.tv_sec - start.tv_sec) * 1000 + (now.tv_nsec - start.tv_nsec) / 1000000;
+    if (elapsed_ms >= (long)delay_ms) {
+      break;
+    }
+    long remaining_ms = (long)delay_ms - elapsed_ms;
+    long step_ms = (remaining_ms > 20) ? 20 : remaining_ms;
+    struct timespec step = {(time_t)(step_ms / 1000), (long)((step_ms % 1000) * 1000000)};
+    nanosleep(&step, NULL);
+  }
+
+  if (dc != NULL) {
+    datacenter_reap_vms(dc);
+  }
+}
+
 void datacenter_wait(unsigned int delay_ms){
-  struct timespec delay = (struct timespec){delay_ms / 1000, (delay_ms % 1000) * 1000000};
-  nanosleep(&delay, NULL);
+  datacenter_wait_dc(g_current_dc, delay_ms);
 }

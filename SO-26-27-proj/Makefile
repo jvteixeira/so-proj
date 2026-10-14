@@ -21,7 +21,7 @@ run: cloudIST
 	@./cloudIST
 
 clean:
-	rm -f *.o cloudIST
+	rm -rf *.o cloudIST cloudIST.dSYM
 
 format:
 	@which clang-format >/dev/null 2>&1 || echo "Please install clang-format to run this command"

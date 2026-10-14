@@ -32,7 +32,12 @@ static int skip_spaces(int fd, char *first){
   while (1) {
     bytes_read = read(fd, &ch, 1);
 
-    if (bytes_read <= 0)
+    if (bytes_read < 0) {
+      if (errno == EINTR) continue;
+      return -1;
+    }
+
+    if (bytes_read == 0)
       return -1;
 
     if (ch != ' '){
@@ -76,7 +81,10 @@ static int read_string(int fd, char *buffer, size_t max, char *delimiter){
 
     buffer[i++] = ch;
 
-    if (read(fd, &ch, 1) != 1) {
+    ssize_t r;
+    while ((r = read(fd, &ch, 1)) < 0 && errno == EINTR)
+      ;
+    if (r != 1) {
       *delimiter = '\0';
       break;
     }
@@ -122,7 +130,10 @@ static int read_size_t(int fd, size_t *value, char *delimiter) {
 
     buf[i++] = ch;
 
-    if (read(fd, &ch, 1) != 1) {
+    ssize_t r;
+    while ((r = read(fd, &ch, 1)) < 0 && errno == EINTR)
+      ;
+    if (r != 1) {
       *delimiter = '\0';
       break;
     }
@@ -284,7 +295,6 @@ static int validate_command_delimiter(Command command, char delimiter){
 
 int validate_directory_arg(const char *str) {
   int fd = open(str, O_RDONLY | O_DIRECTORY);
-  if (fd == -1) return 1;
   return fd;
 }
 
@@ -369,7 +379,10 @@ Command get_next_command(int fd){
   char ch;
   char delimiter;
 
-  if (read(fd, &ch, 1) != 1) {
+  ssize_t r;
+  while ((r = read(fd, &ch, 1)) < 0 && errno == EINTR)
+    ;
+  if (r != 1) {
     return EOC;
   }
 
@@ -389,7 +402,9 @@ Command get_next_command(int fd){
     return CMD_INVALID;
   }
 
-  ssize_t bytes = read(fd, &delimiter, 1);
+  ssize_t bytes;
+  while ((bytes = read(fd, &delimiter, 1)) < 0 && errno == EINTR)
+    ;
 
   if (bytes == 0) {
     delimiter = '\0';
