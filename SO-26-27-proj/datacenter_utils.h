@@ -4,7 +4,19 @@
 #include "datacenter.h"
 
 /**
- * Checks if a VMType with the given id exists.
+ * Checks if a VMType with the given id exists. The caller must hold the VM
+ * types lock (read or write).
+ *
+ * @param dc Pointer to Data Center.
+ * @param type_id Id of VM type being checked.
+ *
+ * @return Pointer to VMType if it exists.
+ * @return NULL if VMType does not exist.
+ */
+VMType *VMType_exists_locked(DataCenter *dc, const char* type_id);
+
+/**
+ * Checks if a VMType with the given id exists. Takes the VM types read lock.
  * 
  * @param dc Pointer to Data Center.
  * @param type_id Id of VM type being checked.
@@ -15,13 +27,65 @@
 VMType *VMType_exists(DataCenter *dc, const char* type_id);
 
 /**
+ * Validates the parameters of every reservation item (VM types that exist,
+ * valid server ids, non-zero amounts, total number of VMs) and attaches the
+ * corresponding VMType to each item. Does not need any server lock.
+ *
+ * @param dc Data Center where the reservation will be validated.
+ * @param reservation Reservation to validate.
+ *
+ * @return 0 if the parameters are valid.
+ * @return 1 otherwise.
+ */
+int reservation_check_items(DataCenter *dc, Reservation *reservation);
+
+/**
+ * Adds the reservation to the Data Center reservation list, making sure no
+ * other reservation with the same id exists. Takes the reservations lock.
+ *
+ * @param dc Pointer to Data Center.
+ * @param reservation Heap allocated reservation to add.
+ *
+ * @return 0 on success.
+ * @return 1 if the id already exists or the list is full.
+ */
+int reservation_register(DataCenter *dc, Reservation *reservation);
+
+/**
+ * Releases the VMs of the reservation (see reservation_release()) and removes
+ * it from the Data Center reservation list, without freeing it. Takes the
+ * reservations lock.
+ *
+ * @param dc Pointer to Data Center.
+ * @param reservation Reservation to remove.
+ */
+void reservation_unregister(DataCenter *dc, Reservation *reservation);
+
+/**
+ * Locks, by ascending id, every server used by the reservation.
+ *
+ * @param dc Pointer to Data Center.
+ * @param reservation Reservation whose servers are locked.
+ */
+void reservation_lock_servers(DataCenter *dc, Reservation *reservation);
+
+/**
+ * Unlocks every server used by the reservation.
+ *
+ * @param dc Pointer to Data Center.
+ * @param reservation Reservation whose servers are unlocked.
+ */
+void reservation_unlock_servers(DataCenter *dc, Reservation *reservation);
+
+/**
  * Simulates the placement of every VM requested in the reservation using a
  * temporary copy of each server's available resources. The Data Center state
  * is left unchanged regardless of the outcome.
  *
  * Validation fails if any requested server does not have enough available
- * resources to host all the requested VMs assigned to it or if the request 
- * does not have valid parameters (VM types that do not exist, invalid server ids).
+ * resources to host all the requested VMs assigned to it.
+ * Must be called after reservation_check_items() and with the reservation
+ * servers locked.
  *
  * @param dc Data Center where the reservation will be validated.
  * @param reservation Reservation to validate.
@@ -38,8 +102,9 @@ int reservation_validate(DataCenter *dc, Reservation *reservation);
  * server hosted VM list.
  *
  * The reservation is expected to have already passed validation before this
- * function is called. If an error occurs during the commit process, the
- * function performs a rollback of the changes made by this operation.
+ * function is called, and its servers must still be locked. If an error occurs
+ * during the commit process, the function performs a rollback of the changes
+ * made by this operation.
  *
  * @param dc Data Center where the reservation will be committed.
  * @param reservation Reservation to allocate.
@@ -51,6 +116,7 @@ int reservation_commit(DataCenter *dc, Reservation *reservation);
 
 /**
  * Looks up a reservation by id and checks that it is pending.
+ * Must be called with the reservations lock held.
  *
  * @param dc Pointer to a Data Center.
  * @param reservation_id ID of the reservation to look up.
@@ -62,20 +128,21 @@ Reservation *find_pending_reservation(DataCenter *dc, const char *reservation_id
 
 /**
  * Frees every VM allocated to the reservation, returns their resources to the
- * corresponding hosting servers, removes them from each server's hosted VM
- * list, and finally removes the reservation from the Data Center reservation
- * list.
+ * corresponding hosting servers and removes them from each server's hosted VM
+ * list. The reservation itself is neither freed nor removed from the list.
+ * Takes the lock of each hosting server.
  *
  * @param dc Pointer to the Data Center containing the reservation.
- * @param reservation Pointer to the reservation to destroy.
+ * @param reservation Pointer to the reservation whose VMs are released.
  */
-void reservation_destroy(DataCenter *dc, Reservation *reservation);
+void reservation_release(DataCenter *dc, Reservation *reservation);
 
 /**
  * Destroys a single VM: frees its resources back to the hosting server,
  * removes it from the server's hosted VM list and the reservation's VM list,
  * frees the VM, and if all VMs of the reservation have finished, removes the
- * reservation from the Data Center.
+ * reservation from the Data Center and frees it.
+ * Must be called with the reservations lock held.
  *
  * @param dc Pointer to the Data Center containing the VM.
  * @param vm Pointer to the VM to destroy.

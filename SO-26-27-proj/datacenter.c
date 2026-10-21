@@ -30,8 +30,10 @@ void datacenter_init(DataCenter *dc) {
   dc->num_servers = 0;
 
   dc->num_vm_types = 0;
+  pthread_rwlock_init(&dc->vm_types_lock, NULL);
 
   dc->num_reservations = 0;
+  pthread_mutex_init(&dc->reservations_lock, NULL);
 
   dc->configured = 0;
   dc->local_cpus = 0.0;
@@ -50,7 +52,14 @@ void datacenter_destroy(DataCenter *dc) {
     for(size_t j = 0; j < dc->servers[i].num_hosted_vms; j++){
       free(dc->servers[i].hosted_vms[j]);
     }
+    pthread_mutex_destroy(&dc->servers[i].lock);
   }
+  for (size_t i = 0; i < dc->num_reservations; i++) {
+    free(dc->reservations[i]);
+  }
+  dc->num_reservations = 0;
+  pthread_mutex_destroy(&dc->reservations_lock);
+  pthread_rwlock_destroy(&dc->vm_types_lock);
   free(dc->servers);
   dc->servers = NULL;
   dc->num_servers = 0;
@@ -80,6 +89,7 @@ int datacenter_configure(DataCenter *dc, size_t num_servers, Resources *resource
     dc->servers[i].total = *resources;
     dc->servers[i].available = *resources;
     dc->servers[i].num_hosted_vms = 0;
+    pthread_mutex_init(&dc->servers[i].lock, NULL);
   }
 
   dc->num_servers = num_servers;
@@ -94,11 +104,6 @@ int datacenter_define_VM(DataCenter *dc, VMType *type){
     return 1;
   }
 
-  if(VMType_exists(dc, type->id) != NULL){
-    fprintf(stderr, "VM type with id %s already exists.\n", type->id);
-    return 1;
-  }
-
   if (!file_exists(type->exec_path)) {
     fprintf(stderr, "Invalid executable path.\n");
     return 1;
@@ -109,11 +114,6 @@ int datacenter_define_VM(DataCenter *dc, VMType *type){
     return 1;
   }
 
-  if(dc->num_vm_types >= MAX_VM_TYPES){
-    fprintf(stderr, "Maximum of VM types reached.\n");
-    return 1;
-  }
-  
   VMType resolved_type = *type;
   char abs_exec[MAX_PATH_SIZE];
   if (absolute_path(type->exec_path, abs_exec, sizeof(abs_exec)) == 0) {
@@ -126,9 +126,21 @@ int datacenter_define_VM(DataCenter *dc, VMType *type){
     resolved_type.input_folder[sizeof(resolved_type.input_folder) - 1] = '\0';
   }
 
-  dc->vm_types[dc->num_vm_types++] = resolved_type;
+  // Check and insert atomically so two threads cannot define the same type.
+  int ret = 0;
+  pthread_rwlock_wrlock(&dc->vm_types_lock);
+  if (VMType_exists_locked(dc, type->id)) {
+    fprintf(stderr, "VM type with id %s already exists.\n", type->id);
+    ret = 1;
+  } else if (dc->num_vm_types >= MAX_VM_TYPES) {
+    fprintf(stderr, "Maximum of VM types reached.\n");
+    ret = 1;
+  } else {
+    dc->vm_types[dc->num_vm_types++] = resolved_type;
+  }
+  pthread_rwlock_unlock(&dc->vm_types_lock);
 
-  return 0;
+  return ret;
 }
 
 /* Função auxiliar para criar diretoria ignorando erro se já existir */
@@ -143,10 +155,10 @@ static int ensure_dir_exists(const char *path, mode_t mode) {
 
 /* Copia um único ficheiro normal usando descritores POSIX */
 static int copy_file(const char *src_path, const char *dst_path, mode_t mode) {
-    int src_fd = open(src_path, O_RDONLY);
+    int src_fd = open(src_path, O_RDONLY | O_CLOEXEC);
     if (src_fd < 0) return -1;
 
-    int dst_fd = open(dst_path, O_WRONLY | O_CREAT | O_TRUNC, mode);
+    int dst_fd = open(dst_path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, mode);
     if (dst_fd < 0) {
       close(src_fd);
       return -1;
@@ -220,28 +232,16 @@ static int copy_directory_recursive(const char *src_path, const char *dst_path) 
   return 0;
 }
 
-int datacenter_reserve(DataCenter *dc, Reservation *reservation) {
-  if (!dc->configured) {
-    fprintf(stderr, "Data Center needs to be configured!\n");
-    return 1;
-  }
-
-  if (reservation_validate(dc, reservation) != 0) {
-    return 1;
-  }
-
-  if (dc->num_reservations >= MAX_RESERVATIONS) {
-    fprintf(stderr, "Max number of reservations reached\n");
-    return 1;
-  }
-
-  if (reservation_commit(dc, reservation) != 0) {
-    return 1;
-  }
-
-  dc->reservations[dc->num_reservations] = *reservation;
-  dc->num_reservations++;
-
+/**
+ * Creates /tmp/CloudIST/<ID-reserva>/<ID-VM> for every VM of the reservation
+ * and copies the input folder of each VM type into it.
+ *
+ * @param reservation Reservation whose folders are prepared.
+ *
+ * @return 0 on success.
+ * @return 1 on error.
+ */
+static int prepare_reservation_dirs(Reservation *reservation) {
   if (ensure_dir_exists("/tmp/CloudIST", 0755) != 0) {
     perror("Erro ao criar /tmp/CloudIST");
     return 1;
@@ -271,6 +271,58 @@ int datacenter_reserve(DataCenter *dc, Reservation *reservation) {
   return 0;
 }
 
+int datacenter_reserve(DataCenter *dc, Reservation *reservation) {
+  if (!dc->configured) {
+    fprintf(stderr, "Data Center needs to be configured!\n");
+    return 1;
+  }
+
+  if (reservation_check_items(dc, reservation) != 0) {
+    return 1;
+  }
+
+  // Heap allocated so its address stays valid while other threads change the list.
+  Reservation *res = malloc(sizeof(Reservation));
+  if (res == NULL) {
+    fprintf(stderr, "Failed to allocate reservation.\n");
+    return 1;
+  }
+  *res = *reservation;
+  res->num_vms = 0;
+  res->state = RES_STATE_RESERVING;
+
+  // Claims the id. While RESERVING the reservation cannot be executed.
+  if (reservation_register(dc, res) != 0) {
+    free(res);
+    return 1;
+  }
+
+  // Only the servers used by this reservation are locked, so reservations on
+  // different servers are validated and committed in parallel.
+  reservation_lock_servers(dc, res);
+  int failed = reservation_validate(dc, res) != 0 || reservation_commit(dc, res) != 0;
+  reservation_unlock_servers(dc, res);
+
+  if (failed) {
+    reservation_unregister(dc, res);
+    free(res);
+    return 1;
+  }
+
+  // Copying the input folders is the slowest step, so it is done without locks.
+  if (prepare_reservation_dirs(res) != 0) {
+    reservation_unregister(dc, res);
+    free(res);
+    return 1;
+  }
+
+  pthread_mutex_lock(&dc->reservations_lock);
+  res->state = RES_STATE_PENDING;
+  pthread_mutex_unlock(&dc->reservations_lock);
+
+  return 0;
+}
+
 
 int datacenter_execute(DataCenter *dc, const char *reservation_id) {
   if(!dc->configured){
@@ -280,14 +332,20 @@ int datacenter_execute(DataCenter *dc, const char *reservation_id) {
 
   datacenter_reap_vms(dc);
 
+  // The lock is held while forking so that a VM that exits immediately is
+  // only reaped after its pid has been recorded.
+  pthread_mutex_lock(&dc->reservations_lock);
   Reservation *res = find_pending_reservation(dc, reservation_id);
-  if (!res) return 1;
+  if (!res) {
+    pthread_mutex_unlock(&dc->reservations_lock);
+    return 1;
+  }
 
-  if (spawn_all_vms(res) != 0) return 1;
-
+  int ret = spawn_all_vms(res);
   res->state = RES_STATE_RUNNING;
+  pthread_mutex_unlock(&dc->reservations_lock);
 
-  return 0;
+  return ret;
 }
 
 int datacenter_list(DataCenter *dc) {
@@ -297,6 +355,15 @@ int datacenter_list(DataCenter *dc) {
   }
 
   datacenter_reap_vms(dc);
+
+  // Takes every lock (in the global order) to print a consistent snapshot, and
+  // locks stdout so the listing is not interleaved with other threads' output.
+  pthread_rwlock_rdlock(&dc->vm_types_lock);
+  pthread_mutex_lock(&dc->reservations_lock);
+  for (size_t i = 0; i < dc->num_servers; i++) {
+    pthread_mutex_lock(&dc->servers[i].lock);
+  }
+  flockfile(stdout);
 
   printf("=================================== DATA CENTER STATUS ===================================\n");
   printf("\n[ PHYSICAL SERVERS ] (%zu total)\n", dc->num_servers);
@@ -360,7 +427,7 @@ int datacenter_list(DataCenter *dc) {
     printf(" (None)\n\n");
   } else {
     for (size_t i = 0; i < dc->num_reservations; i++) {
-      Reservation res = dc->reservations[i];
+      Reservation res = *dc->reservations[i];
       printf("  * Reservation ID: %-12s | State: %-8s | Total VMs: %zu\n",
               res.id, res_state_to_string(res.state), res.num_vms);
 
@@ -387,6 +454,13 @@ int datacenter_list(DataCenter *dc) {
   }
 
   printf("================================================================--------------------------\n\n");
+
+  funlockfile(stdout);
+  for (size_t i = dc->num_servers; i > 0; i--) {
+    pthread_mutex_unlock(&dc->servers[i - 1].lock);
+  }
+  pthread_mutex_unlock(&dc->reservations_lock);
+  pthread_rwlock_unlock(&dc->vm_types_lock);
   return 0;
 }
 
@@ -402,9 +476,11 @@ void datacenter_reap_vms(DataCenter *dc) {
   pid_t pid;
   int status;
   while ((pid = waitpid(-1, &status, WNOHANG)) > 0) {
+    pthread_mutex_lock(&dc->reservations_lock);
     int found = 0;
     for (size_t i = 0; i < dc->num_reservations; i++) {
-      Reservation *res = &dc->reservations[i];
+      Reservation *res = dc->reservations[i];
+      if (res->state != RES_STATE_RUNNING) continue;
       for (size_t j = 0; j < res->num_vms; j++) {
         VM *vm = res->vms[j];
         if (vm != NULL && vm->pid == pid) {
@@ -415,6 +491,7 @@ void datacenter_reap_vms(DataCenter *dc) {
       }
       if (found) break;
     }
+    pthread_mutex_unlock(&dc->reservations_lock);
   }
 }
 
@@ -427,12 +504,16 @@ void datacenter_reap_vms(DataCenter *dc) {
 int datacenter_has_running_vms(DataCenter *dc) {
   if (dc == NULL || !dc->configured) return 0;
 
+  int running = 0;
+  pthread_mutex_lock(&dc->reservations_lock);
   for (size_t i = 0; i < dc->num_reservations; i++) {
-    if (dc->reservations[i].state == RES_STATE_RUNNING && dc->reservations[i].num_vms > 0) {
-      return 1;
+    if (dc->reservations[i]->state == RES_STATE_RUNNING && dc->reservations[i]->num_vms > 0) {
+      running = 1;
+      break;
     }
   }
-  return 0;
+  pthread_mutex_unlock(&dc->reservations_lock);
+  return running;
 }
 
 /**

@@ -3,6 +3,7 @@
 
 #include <stdio.h>
 #include <sys/types.h>
+#include <pthread.h>
 
 #include "resources.h"
 #include "constants.h"
@@ -40,9 +41,12 @@ typedef struct Server {
 
 	VM *hosted_vms[MAX_HOSTED_VMS];
     size_t num_hosted_vms;
+
+	pthread_mutex_t lock; // Protects available and hosted_vms.
 } Server;
 
 typedef enum {
+    RES_STATE_RESERVING, // Registered, VMs being allocated and input folders being copied
     RES_STATE_PENDING,   // Reserved via 'R', waiting for 'A'
     RES_STATE_RUNNING,   // 'A' was called
     RES_STATE_FINISHED   // All VMs in this reservation have terminated
@@ -67,15 +71,29 @@ typedef struct Reservation {
 	ReservationState state;                         // State of the reservation.
 } Reservation;
 
+/*
+ * Synchronization (exercise 3):
+ *  - vm_types_lock (rwlock): VM types are only appended and never change after
+ *    being defined, so pointers to them stay valid without holding the lock.
+ *  - reservations_lock (mutex): the reservation list, each Reservation and the
+ *    state/pid of every VM.
+ *  - Server.lock (mutex, one per server): the server's available resources and
+ *    hosted VM list. Reservations on different servers proceed in parallel.
+ *
+ * Lock order (to avoid deadlocks): vm_types_lock -> reservations_lock ->
+ * server locks by ascending id -> stdout.
+ */
 typedef struct DataCenter {
 	Server *servers;			     // List of Servers.
 	size_t num_servers;              // Number of Servers.
 
 	VMType vm_types[MAX_VM_TYPES];
     size_t num_vm_types;
+	pthread_rwlock_t vm_types_lock;   // Protects vm_types and num_vm_types.
 
-	Reservation reservations[MAX_RESERVATIONS];
+	Reservation *reservations[MAX_RESERVATIONS];
     size_t num_reservations;
+	pthread_mutex_t reservations_lock; // Protects the reservation list, the reservations and their VMs' state/pid.
 
 	int configured;		      // Wheter the datacenter is configured or not.
 	double local_cpus;        // Number of local machine cores for CloudIST

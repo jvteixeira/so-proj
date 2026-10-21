@@ -294,7 +294,7 @@ static int validate_command_delimiter(Command command, char delimiter){
  */
 
 int validate_directory_arg(const char *str) {
-  int fd = open(str, O_RDONLY | O_DIRECTORY);
+  int fd = open(str, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
   return fd;
 }
 

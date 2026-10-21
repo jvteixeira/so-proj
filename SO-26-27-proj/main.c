@@ -3,6 +3,7 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <signal.h>
+#include <pthread.h>
 
 #include "parser.h"
 #include "datacenter.h"
@@ -17,6 +18,93 @@
  */
 static void handle_sigchld(int sig) {
 	(void)sig;
+}
+
+/**
+ * Shared state between the worker threads: the list of .conf files and the
+ * index of the next file to be processed.
+ */
+typedef struct {
+	DataCenter *dc;
+	int dir_fd;
+	const char **files;
+	int num_files;
+	int next_file;          // Protected by lock.
+	pthread_mutex_t lock;
+} WorkQueue;
+
+void aux_executer(DataCenter *dc, int fd);
+
+/**
+ * Worker thread: repeatedly takes the next .conf file (in alphabetical order)
+ * and executes its commands, until no files are left.
+ *
+ * @param arg Pointer to the shared WorkQueue.
+ */
+static void *worker_thread(void *arg) {
+	WorkQueue *queue = (WorkQueue *)arg;
+
+	while (1) {
+		pthread_mutex_lock(&queue->lock);
+		int i = queue->next_file < queue->num_files ? queue->next_file++ : -1;
+		pthread_mutex_unlock(&queue->lock);
+
+		if (i < 0) break;
+
+		int fd = openat(queue->dir_fd, queue->files[i], O_RDONLY | O_CLOEXEC);
+		if (fd < 0) {
+			fprintf(stderr, "Failed to open %s\n", queue->files[i]);
+			continue;
+		}
+		aux_executer(queue->dc, fd);
+		close(fd);
+	}
+
+	return NULL;
+}
+
+/**
+ * Processes every file in the list using at most max_threads worker threads.
+ *
+ * @param dc Pointer to Data Center.
+ * @param dir_fd File descriptor of the input directory.
+ * @param files Names of the .conf files, in alphabetical order.
+ * @param num_files Number of files.
+ * @param max_threads Maximum number of worker threads.
+ */
+static void process_files(DataCenter *dc, int dir_fd, const char **files,
+		int num_files, size_t max_threads) {
+	WorkQueue queue = {
+		.dc = dc,
+		.dir_fd = dir_fd,
+		.files = files,
+		.num_files = num_files,
+		.next_file = 0
+	};
+	pthread_mutex_init(&queue.lock, NULL);
+
+	// There is no point in having more threads than files.
+	size_t num_threads = max_threads < (size_t)num_files ? max_threads : (size_t)num_files;
+	pthread_t threads[num_threads];
+	size_t created = 0;
+
+	for (; created < num_threads; created++) {
+		if (pthread_create(&threads[created], NULL, worker_thread, &queue) != 0) {
+			fprintf(stderr, "Failed to create worker thread.\n");
+			break;
+		}
+	}
+
+	// If no thread could be created, the main thread does the work.
+	if (created == 0) {
+		worker_thread(&queue);
+	}
+
+	for (size_t i = 0; i < created; i++) {
+		pthread_join(threads[i], NULL);
+	}
+
+	pthread_mutex_destroy(&queue.lock);
 }
 
 /**
@@ -140,8 +228,8 @@ int main(int argc, char **argv){
 	sa.sa_flags = SA_RESTART;
 	sigaction(SIGCHLD, &sa, NULL);
 
-	if (argc < 5 || argc > 7) {
-		fprintf(stderr, "Usage: %s <servers> <ram> <disk> <cpus> [<local_cores>] [<input_dir>]\n", 
+	if (argc < 6 || argc > 8) {
+		fprintf(stderr, "Usage: %s <servers> <ram> <disk> <cpus> <local_cores> [<input_dir> [<max_threads>]]\n",
 			argv[0]);
 		return 1;
   	}
@@ -170,31 +258,20 @@ int main(int argc, char **argv){
 		return 1;
 	}
 
-	double local_cores = 0.0;
-	const char *input_dir = NULL;
+	double local_cores;
+	const char *input_dir = (argc >= 7) ? argv[6] : NULL;
+	size_t max_threads = 1;
 
-	if (argc == 7) {
-		if (parse_double_arg(argv[5], &local_cores) != 0 || local_cores <= 0.0) {
-			fprintf(stderr, "Invalid local cores argument.\n");
-			datacenter_destroy(&dc);
-			return 1;
-		}
-		input_dir = argv[6];
-	} else if (argc == 6) {
-		if (path_exists(argv[5])) {
-			input_dir = argv[5];
-			local_cores = cpu * (double)servers;
-		} else {
-			if (parse_double_arg(argv[5], &local_cores) != 0 || local_cores <= 0.0) {
-				fprintf(stderr, "Invalid argument: %s\n", argv[5]);
-				datacenter_destroy(&dc);
-				return 1;
-			}
-			input_dir = NULL;
-		}
-	} else { // argc == 5
-		local_cores = cpu * (double)servers;
-		input_dir = NULL;
+	if (parse_double_arg(argv[5], &local_cores) != 0 || local_cores <= 0.0) {
+		fprintf(stderr, "Invalid local cores argument: %s\n", argv[5]);
+		datacenter_destroy(&dc);
+		return 1;
+	}
+
+	if (argc == 8 && (parse_size_t_arg(argv[7], &max_threads) != 0 || max_threads == 0)) {
+		fprintf(stderr, "Invalid max threads argument: %s\n", argv[7]);
+		datacenter_destroy(&dc);
+		return 1;
 	}
 
 	datacenter_set_local_cpus(&dc, local_cores);
@@ -210,12 +287,8 @@ int main(int argc, char **argv){
 		const char **files = NULL;
 		int c = parse_directory_arg(input_dir, &files);
 		if (c > 0 && files != NULL) {
+			process_files(&dc, dir_fd, files, c, max_threads);
 			for (int i = 0; i < c; i++) {
-				int fd = openat(dir_fd, files[i], O_RDONLY);
-				if (fd >= 0) {
-					aux_executer(&dc, fd);
-					close(fd);
-				}
 				free((void *)files[i]);
 			}
 			free(files);
